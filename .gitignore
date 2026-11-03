@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+
+# PyInstaller output
+build/
+dist/
+
+# screen recordings
+*.mkv
+*.mp4
+
+# local tool settings
+.claude/settings.local.json
+.idea/
+.DS_Store
