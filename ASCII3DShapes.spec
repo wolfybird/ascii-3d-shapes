@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['C:\\Users\\rscor\\OneDrive\\Documents\\PycharmProjects\\shapes\\shapes_v9-3-1.py'],
+    ['shapes_v9-6.py'],
     pathex=[],
     binaries=[],
     datas=[],

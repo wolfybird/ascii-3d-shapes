@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build ASCII3DShapes.app for macOS
+# Build the ASCII3DShapes executable for macOS
 # Run this on a Mac: chmod +x build_mac.sh && ./build_mac.sh
 
 set -e
@@ -15,13 +15,13 @@ fi
 # Install dependencies if missing
 python3 -m pip install --quiet numpy sounddevice pyinstaller
 
-# Build .app bundle
+# Build single-file executable
 python3 -m PyInstaller \
     --onefile \
     --name "ASCII3DShapes" \
     --console \
     --clean \
-    shapes_v9-3-1.py
+    shapes_v9-6.py
 
 echo ""
 echo "=== Build complete ==="
