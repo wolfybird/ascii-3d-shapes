@@ -13,3 +13,9 @@ dist/
 .claude/settings.local.json
 .idea/
 .DS_Store
+
+# made by install.py
+.venv/
+Run ASCII 3D Shapes.bat
+Run ASCII 3D Shapes.command
+run_ascii3dshapes.sh
