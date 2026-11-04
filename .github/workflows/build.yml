@@ -86,7 +86,7 @@ jobs:
       - name: Run the terminal version it set up
         shell: bash
         run: |
-          ls Run* run_* 2>/dev/null
+          ls Run* run_* 2>/dev/null || true    # the launcher it made
           case "$RUNNER_OS" in
             Windows) py=.venv/Scripts/python.exe ;;
             *)       py=.venv/bin/python ;;
