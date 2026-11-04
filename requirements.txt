@@ -1,2 +1,3 @@
 numpy
-sounddevice  # optional: audio reactivity
+pygame        # the window; without it the app runs in the terminal
+sounddevice   # optional: audio reactivity
