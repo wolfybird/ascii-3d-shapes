@@ -1,0 +1,2026 @@
+#!/usr/bin/env python3
+"""
+shapes_v9-7.py – ASCII 3D Shape Renderer
+
+v9.7 (2026-11)
+    - Help line lists every key and wraps instead of being cut off
+    - ',' and '.' rotate Z like '<' and '>'; the HUD toggle moved to 'h'
+    - Audio device list shows each device once (WASAPI on Windows), streams
+      open at the device's own sample rate, and a device that fails to open
+      says so instead of quietly switching to the default
+    - "Rhombus" is now called Octahedron, which is what it is
+    - Missing PortAudio (common on Linux) turns audio off instead of crashing
+
+v9.6 (2026-11)
+    - Keys work on macOS/Linux: terminal stays in cbreak mode while running
+    - FPS adapt judges render time instead of the capped frame rate, so
+      density recovers; d/D still work while adapt is on
+    - No audio input at startup turns audio off, so auto-switch still runs
+    - Points mode z-buffer keeps the nearest point per cell
+    - Resolution changes scale FOV instead of resetting it (keeps FOV 65 look)
+    - Sphere rings and meridians close
+    - Seam fixes: Mobius and Klein 2 twist joins, no doubled cylinder lines;
+      Klein 1 is now a true Klein bottle (bottle immersion)
+    - HUD scale no longer jitters with the audio punch
+"""
+
+import math
+import os
+import random
+import shutil
+import sys
+import time
+import threading
+from collections import deque
+from typing import List, Tuple, Callable, Optional
+
+HAS_AUDIO = False
+try:
+    import numpy as np
+    HAS_NUMPY = True
+except ImportError:
+    HAS_NUMPY = False
+
+try:
+    import sounddevice as sd
+    if HAS_NUMPY:
+        HAS_AUDIO = True
+except (ImportError, OSError):  # OSError: PortAudio library not found
+    pass
+
+if not HAS_NUMPY:
+    print("shapes_v9 requires numpy: pip install numpy")
+    sys.exit(1)
+
+CLEAR_CMD = "cls" if os.name == "nt" else "clear"
+COLOR_RESET = "\033[0m"
+
+SHAPE_COLORS = [
+    "\033[38;5;45m",    # 0 cyan
+    "\033[38;5;214m",   # 1 orange
+    "\033[38;5;82m",    # 2 green
+    "\033[38;5;201m",   # 3 magenta
+    "\033[38;5;189m",   # 4 lavender
+    "\033[38;5;160m",   # 5 red
+    "\033[38;5;226m",   # 6 yellow
+    "\033[38;5;21m",    # 7 blue
+    "\033[38;5;255m",   # 8 white
+    "\033[38;5;208m",   # 9 amber
+]
+
+SHAPE_COLOR_NAMES = [
+    "cyan", "orange", "green", "magenta", "lavender",
+    "red", "yellow", "blue", "white", "amber",
+]
+
+SHIFT_NUM_MAP = {
+    '!': 0, '@': 1, '#': 2, '$': 3, '%': 4,
+    '^': 5, '&': 6, '*': 7, '(': 8, ')': 9,
+}
+
+DEPTH_PALETTES = [
+    ("warm-cool",  [196, 202, 208, 214, 220, 226, 154, 82, 46, 49, 51, 45, 39, 33, 27, 21]),
+    ("fire",       [16, 52, 88, 124, 160, 196, 202, 208, 214, 220, 226, 228]),
+    ("ocean",      [16, 17, 18, 19, 20, 21, 27, 33, 39, 45, 51, 87, 123, 159]),
+    ("neon",       [21, 57, 93, 129, 165, 201, 200, 199, 198, 197, 196]),
+    ("matrix",     [16, 22, 28, 34, 40, 46, 82, 118, 154, 190, 226]),
+    ("sunset",     [17, 18, 54, 90, 126, 162, 198, 204, 210, 216, 222, 228]),
+    ("ice",        [16, 17, 18, 24, 30, 36, 37, 44, 45, 51, 123, 159, 195, 231]),
+    ("lava",       [16, 52, 88, 124, 160, 196, 202, 208, 214, 220, 226, 231]),
+    ("candy",      [201, 200, 199, 198, 197, 196, 202, 208, 214, 220, 226, 46, 47, 48, 49]),
+    ("aurora",     [16, 17, 18, 19, 25, 31, 37, 43, 49, 48, 84, 120, 156, 192, 228]),
+    ("synthwave",  [16, 17, 18, 54, 90, 126, 162, 198, 199, 205, 211, 217]),
+    ("grayscale",  [232, 234, 236, 238, 240, 242, 244, 246, 248, 250, 252, 254, 255]),
+    ("rainbow",    [196, 202, 208, 214, 226, 154, 82, 46, 49, 51, 45, 39, 33, 27, 21, 57, 93, 129, 165, 201]),
+    ("toxic",      [16, 22, 28, 34, 40, 46, 47, 48, 49, 50, 51, 87, 123, 159, 195]),
+]
+
+BRIGHTNESS_RAMPS = [
+    " .:-=+*#%@",
+    " .oO@",
+    " .:+*#",
+]
+
+COLOR_MODES = ["off", "shape", "depth", "rotate"]
+ONSET_MODES = [
+    "all",
+    "punch+shape",
+    "punch+palette",
+    "punch only",
+    "shape+palette",
+    "shape only",
+    "palette only",
+]
+
+RESOLUTION_PRESETS = [
+    ("Auto",   None, None),
+    ("Small",  80,   24),
+    ("Medium", 120,  40),
+    ("Large",  160,  50),
+    ("XL",     200,  55),
+]
+
+TARGET_FPS = 30
+FPS_FLOOR = 15
+ARROW_ROT_DELTA = 0.1
+
+WIDTH = 120
+HEIGHT = 40
+
+
+def clamp(v, lo, hi):
+    return max(lo, min(hi, v))
+
+
+def terminal_size():
+    size = shutil.get_terminal_size(fallback=(120, 40))
+    return max(40, size.columns), max(10, size.lines - 1)
+
+
+def fov_for_size(w, h):
+    eff_w = w * 0.8
+    eff_h = (h - 3) * 2.2
+    return clamp(min(eff_w, eff_h) * 0.35, 2.0, 100.0)
+
+
+def apply_resolution(preset_idx):
+    global WIDTH, HEIGHT
+    old_fit = fov_for_size(WIDTH, HEIGHT)
+    term_w, term_h = terminal_size()
+    label, pw, ph = RESOLUTION_PRESETS[preset_idx]
+    if pw is None:
+        WIDTH, HEIGHT = term_w, term_h
+    else:
+        WIDTH = min(pw, term_w)
+        HEIGHT = min(ph, term_h)
+    fov = config.fov
+    fov.value = clamp(fov.value * fov_for_size(WIDTH, HEIGHT) / old_fit,
+                      fov.lo, fov.hi)
+
+
+# ── Pre-built escape code lookup ────────────────────
+
+_COLOR_ESCAPE_CACHE = {}
+
+
+def _color_escape(code):
+    if code not in _COLOR_ESCAPE_CACHE:
+        _COLOR_ESCAPE_CACHE[code] = f"\033[38;5;{code}m"
+    return _COLOR_ESCAPE_CACHE[code]
+
+
+def _build_palette_lut(palette, n=256):
+    lut = []
+    plen = len(palette)
+    for i in range(n):
+        z_norm = i / (n - 1)
+        idx = int(z_norm * (plen - 1))
+        lut.append(_color_escape(palette[idx]))
+    return lut
+
+
+_PALETTE_LUTS = {}
+
+
+def _get_palette_lut(palette_idx):
+    key = palette_idx % len(DEPTH_PALETTES)
+    if key not in _PALETTE_LUTS:
+        _, palette = DEPTH_PALETTES[key]
+        _PALETTE_LUTS[key] = _build_palette_lut(palette)
+    return _PALETTE_LUTS[key]
+
+
+# ── Param system ──────────────────────────────────────
+
+class Param:
+    def __init__(self, name, value, lo, hi, step, fmt=".2f",
+                 key_down=None, key_up=None, multiplicative=False):
+        self.name = name
+        self.value = value
+        self.lo = lo
+        self.hi = hi
+        self.step = step
+        self.fmt = fmt
+        self.key_down = key_down
+        self.key_up = key_up
+        self.multiplicative = multiplicative
+
+    def increase(self):
+        if self.multiplicative:
+            self.value = min(self.hi, self.value * self.step)
+        else:
+            self.value = min(self.hi, self.value + self.step)
+
+    def decrease(self):
+        if self.multiplicative:
+            self.value = max(self.lo, self.value / self.step)
+        else:
+            self.value = max(self.lo, self.value - self.step)
+
+    @property
+    def at_min(self):
+        if self.multiplicative:
+            return self.value <= self.lo * 1.001
+        return self.value <= self.lo + abs(self.step) * 0.01
+
+    @property
+    def at_max(self):
+        if self.multiplicative:
+            return self.value >= self.hi * 0.999
+        return self.value >= self.hi - abs(self.step) * 0.01
+
+    def display(self):
+        if self.value == 0 and self.lo == 0:
+            return f"{self.name}:OFF"
+        val_str = f"{self.value:{self.fmt}}"
+        tag = ""
+        if self.at_min:
+            tag = "[MIN]"
+        elif self.at_max:
+            tag = "[MAX]"
+        return f"{self.name}:{val_str}{tag}"
+
+
+class Config:
+    def __init__(self, auto_fov=65.0):
+        self.scale = Param("Scl", 1.0, 0.05, 5.0, 1.1, ".2f", "-", "+",
+                           multiplicative=True)
+        self.fov = Param("FOV", auto_fov, 0.5, 100.0, 0.5, ".1f", "f", "F")
+        self.speed_x = Param("Spd", 0.06, 0.001, 0.5, 1.15, ".3f", "[", "]",
+                             multiplicative=True)
+        self.speed_y = Param("SpdY", 0.05, 0.001, 0.5, 1.15, ".3f", None, None,
+                             multiplicative=True)
+        self.density = Param("Den", 1.0, 0.25, 4.0, 1.2, ".2f", "d", "D",
+                             multiplicative=True)
+        self.auto_switch = Param("Auto", 6.0, 0.0, 60.0, 1.0, ".0f", "s", "S")
+        self.depth_range = Param("DRng", 6.0, 1.0, 20.0, 0.5, ".1f", "z", "Z")
+        self.audio_sens = Param("Sens", 1.3, 0.1, 5.0, 1.15, ".1f", "n", "N",
+                                multiplicative=True)
+
+        self.shape_index = 0
+        self.paused = False
+        self.auto_rotate = True
+        self.render_mode = "wire"
+        self.brightness_enabled = True
+        self.brightness_ramp_idx = 1
+        self.color_mode_idx = 2
+        self.depth_palette_idx = 0
+        self.depth_invert = False
+        self.shape_color_idx = -1
+        self.audio_reactive = True
+        self.audio_onset_mode = 0
+        self.hud_visible = True
+        self.resolution_idx = 0
+        self.fps_adapt = False
+
+        self.all_params = [self.scale, self.fov, self.speed_x, self.density,
+                           self.auto_switch, self.depth_range, self.audio_sens]
+
+    @property
+    def color_mode(self):
+        return COLOR_MODES[self.color_mode_idx % len(COLOR_MODES)]
+
+    def handle_key(self, ch):
+        for p in self.all_params:
+            if p.key_up and ch == p.key_up:
+                p.increase()
+                if p is self.speed_x:
+                    self.speed_y.increase()
+                return True
+            if p.key_down and ch == p.key_down:
+                p.decrease()
+                if p is self.speed_x:
+                    self.speed_y.decrease()
+                return True
+        return False
+
+
+config = Config()
+
+
+# ── Z normalization ──────────────────────────────────
+
+def z_normalize(z_vals):
+    half = config.depth_range.value / 2.0
+    norm = np.clip((z_vals + half) / config.depth_range.value, 0.0, 1.0)
+    if config.depth_invert:
+        norm = 1.0 - norm
+    return norm
+
+
+# ── Vectorized rotation & projection ─────────────────
+
+def make_rot_x(a):
+    c, s = math.cos(a), math.sin(a)
+    return np.array([[1, 0, 0], [0, c, -s], [0, s, c]], dtype=np.float64)
+
+
+def make_rot_y(a):
+    c, s = math.cos(a), math.sin(a)
+    return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]], dtype=np.float64)
+
+
+def make_rot_z(a):
+    c, s = math.cos(a), math.sin(a)
+    return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]], dtype=np.float64)
+
+
+def batch_rotate_project(verts_np, ax, ay, az, scale):
+    rot = make_rot_z(az) @ make_rot_y(ay) @ make_rot_x(ax)
+    rotated = verts_np @ rot.T
+    zs = rotated[:, 2]
+    denom = zs + 4.0
+    denom = np.where(denom == 0, 1e-4, denom)
+    f = config.fov.value / denom
+    xs = (rotated[:, 0] * f * scale + WIDTH // 2).astype(np.int32)
+    ys = (-rotated[:, 1] * f * scale + HEIGHT // 2).astype(np.int32)
+    return xs, ys, zs
+
+
+# ── Flat vectorized line rasterization ───────────────
+
+def rasterize_lines_flat(x1s, y1s, z1s, x2s, y2s, z2s):
+    dx = np.abs(x2s - x1s)
+    dy = np.abs(y2s - y1s)
+    steps = np.maximum(dx, dy).astype(np.int64)
+    steps = np.maximum(steps, 1)
+
+    counts = steps + 1
+    total = int(counts.sum())
+    if total == 0:
+        return np.empty(0, np.int32), np.empty(0, np.int32), np.empty(0, np.float64)
+
+    offsets = np.empty(len(counts) + 1, dtype=np.int64)
+    offsets[0] = 0
+    np.cumsum(counts, out=offsets[1:])
+    starts = offsets[:-1]
+
+    rep_x1 = np.repeat(x1s.astype(np.float64), counts)
+    rep_y1 = np.repeat(y1s.astype(np.float64), counts)
+    rep_z1 = np.repeat(z1s, counts)
+    rep_dx = np.repeat((x2s - x1s).astype(np.float64), counts)
+    rep_dy = np.repeat((y2s - y1s).astype(np.float64), counts)
+    rep_dz = np.repeat(z2s - z1s, counts)
+    rep_steps = np.repeat(steps.astype(np.float64), counts)
+
+    pixel_pos = np.arange(total, dtype=np.float64)
+    group_offsets = np.repeat(starts.astype(np.float64), counts)
+    within_group = pixel_pos - group_offsets
+    t = within_group / rep_steps
+
+    out_x = (rep_x1 + rep_dx * t).astype(np.int32)
+    out_y = (rep_y1 + rep_dy * t).astype(np.int32)
+    out_z = rep_z1 + rep_dz * t
+
+    return out_x, out_y, out_z
+
+
+# ── Screen buffer with z-buffer ──────────────────────
+
+class ScreenBuffer:
+    def __init__(self, w, h):
+        self.w = w
+        self.h = h
+        self.chars = [[" "] * w for _ in range(h)]
+        self.colors = [[""] * w for _ in range(h)]
+        self.zbuf = np.full((h, w), np.inf, dtype=np.float64)
+
+    def clear(self):
+        self.chars = [[" "] * self.w for _ in range(self.h)]
+        self.colors = [[""] * self.w for _ in range(self.h)]
+        self.zbuf[:] = np.inf
+
+    def put_text(self, x, y, text):
+        for i, ch in enumerate(text):
+            xi = x + i
+            if 0 <= xi < self.w and 0 <= y < self.h:
+                self.chars[y][xi] = ch
+                self.colors[y][xi] = ""
+                self.zbuf[y, xi] = -np.inf
+
+    def draw_points(self, xs, ys, zs, ramp, color_lut, static_color):
+        valid = (xs >= 0) & (xs < self.w) & (ys >= 0) & (ys < self.h)
+        fx = xs[valid]
+        fy = ys[valid]
+        fz = zs[valid]
+        if len(fx) == 0:
+            return
+
+        z_norm = z_normalize(fz)
+        ramp_len = len(ramp)
+
+        if config.brightness_enabled:
+            ridx = ((1.0 - z_norm) * (ramp_len - 1)).astype(np.int32)
+        else:
+            ridx = np.full(len(fz), ramp_len - 1, dtype=np.int32)
+
+        if color_lut is not None:
+            cidx = (z_norm * 255).astype(np.int32)
+
+        lin = fy.astype(np.int64) * self.w + fx.astype(np.int64)
+
+        sort_order = np.lexsort((fz, lin))
+        sorted_lin = lin[sort_order]
+
+        unique_mask = np.empty(len(sorted_lin), dtype=bool)
+        unique_mask[0] = True
+        unique_mask[1:] = sorted_lin[1:] != sorted_lin[:-1]
+        deduped = sort_order[unique_mask]
+
+        d_fx = fx[deduped]
+        d_fy = fy[deduped]
+        d_fz = fz[deduped]
+
+        existing_z = self.zbuf[d_fy, d_fx]
+        z_pass = d_fz <= existing_z
+        winners = deduped[z_pass]
+
+        w_fx = fx[winners]
+        w_fy = fy[winners]
+        w_fz = fz[winners]
+        w_ridx = ridx[winners]
+
+        self.zbuf[w_fy, w_fx] = w_fz
+
+        ramp_np = np.array(list(ramp), dtype='U1')
+        w_chars = ramp_np[w_ridx]
+        w_chars[w_chars == ' '] = '.'
+
+        if color_lut is not None:
+            color_np = np.array(color_lut, dtype=object)
+            w_colors = color_np[cidx[winners]]
+        elif static_color:
+            w_colors = np.full(len(winners), static_color, dtype=object)
+        else:
+            w_colors = np.full(len(winners), "", dtype=object)
+
+        lx = w_fx.tolist()
+        ly = w_fy.tolist()
+        lch = w_chars.tolist()
+        lcol = w_colors.tolist()
+        chars_buf = self.chars
+        colors_buf = self.colors
+        for i in range(len(lx)):
+            y = ly[i]
+            x = lx[i]
+            chars_buf[y][x] = lch[i]
+            colors_buf[y][x] = lcol[i]
+
+    def draw_lines(self, x1s, y1s, z1s, x2s, y2s, z2s, ramp, color_lut, static_color):
+        if len(x1s) == 0:
+            return
+        all_x, all_y, all_z = rasterize_lines_flat(x1s, y1s, z1s, x2s, y2s, z2s)
+        self.draw_points(all_x, all_y, all_z, ramp, color_lut, static_color)
+
+    def render(self):
+        parts = []
+        prev_color = ""
+        for r in range(self.h):
+            row_chars = self.chars[r]
+            row_colors = self.colors[r]
+            space_run = 0
+            for c in range(self.w):
+                ch = row_chars[c]
+                if ch == " ":
+                    space_run += 1
+                    continue
+                if space_run > 0:
+                    parts.append(" " * space_run)
+                    space_run = 0
+                col = row_colors[c]
+                if col != prev_color:
+                    parts.append(col if col else COLOR_RESET)
+                    prev_color = col
+                parts.append(ch)
+            if space_run > 0:
+                parts.append(" " * space_run)
+            if r < self.h - 1:
+                parts.append("\n")
+        if prev_color:
+            parts.append(COLOR_RESET)
+        return "".join(parts)
+
+
+# ── Geometry cache ───────────────────────────────────
+
+_geo_cache = {}
+_geo_cache_density = -1.0
+
+
+def get_cached(name, gen_fn, *args):
+    global _geo_cache, _geo_cache_density
+    d = config.density.value
+    if d != _geo_cache_density:
+        _geo_cache.clear()
+        _geo_cache_density = d
+    if name not in _geo_cache:
+        _geo_cache[name] = gen_fn(*args)
+    return _geo_cache[name]
+
+
+# ── Edge generation helpers ──────────────────────────
+
+# wrap_v: join column nv-1 back to column 0 (v is periodic)
+# seam:   seam[j] is the column of row 0 that row nu-1, column j joins
+#         (twisted surfaces like the Mobius strip); None joins column j
+def _make_grid_edges(nu, nv, wrap_v=True, seam=None):
+    i_vals = np.arange(nu, dtype=np.int32)
+    j_vals = np.arange(nv, dtype=np.int32)
+    ig, jg = np.meshgrid(i_vals, j_vals, indexing='ij')
+    i_flat = ig.ravel()
+    j_flat = jg.ravel()
+
+    a = i_flat * nv + j_flat
+    b_u = i_flat * nv + (j_flat + 1) % nv
+    j_next = j_flat
+    if seam is not None:
+        j_next = np.where(i_flat == nu - 1, seam[j_flat], j_flat)
+    b_v = ((i_flat + 1) % nu) * nv + j_next
+
+    edges_u = np.column_stack([a, b_u])
+    if not wrap_v:
+        edges_u = edges_u[j_flat < nv - 1]
+    edges_v = np.column_stack([a, b_v])
+    return np.vstack([edges_u, edges_v]).astype(np.int32)
+
+
+def _make_grid_edges_open(nu, nv):
+    i_vals = np.arange(nu, dtype=np.int32)
+    j_vals = np.arange(nv, dtype=np.int32)
+    ig, jg = np.meshgrid(i_vals, j_vals, indexing='ij')
+    i_flat = ig.ravel()
+    j_flat = jg.ravel()
+    a = i_flat * nv + j_flat
+
+    h_mask = j_flat < nv - 1
+    h_a = a[h_mask]
+    h_b = h_a + 1
+
+    v_mask = i_flat < nu - 1
+    v_a = a[v_mask]
+    v_b = v_a + nv
+
+    edges_h = np.column_stack([h_a, h_b])
+    edges_v = np.column_stack([v_a, v_b])
+    return np.vstack([edges_h, edges_v]).astype(np.int32)
+
+
+# ── Shapes ───────────────────────────────────────────
+
+def _gen_cube():
+    s = 1.0
+    verts = np.array([
+        [-s, -s, -s], [s, -s, -s], [s, s, -s], [-s, s, -s],
+        [-s, -s, s],  [s, -s, s],  [s, s, s],  [-s, s, s],
+    ], dtype=np.float64)
+    edges = np.array([
+        [0, 1], [1, 2], [2, 3], [3, 0],
+        [4, 5], [5, 6], [6, 7], [7, 4],
+        [0, 4], [1, 5], [2, 6], [3, 7],
+    ], dtype=np.int32)
+    return verts, edges
+
+
+def _gen_octahedron():
+    s = 1.0
+    h = 1.5
+    verts = np.array([
+        [0, h, 0], [0, -h, 0],
+        [s, 0, 0], [-s, 0, 0], [0, 0, s], [0, 0, -s],
+    ], dtype=np.float64)
+    edges = np.array([
+        [0, 2], [0, 3], [0, 4], [0, 5],
+        [1, 2], [1, 3], [1, 4], [1, 5],
+        [2, 4], [4, 3], [3, 5], [5, 2],
+    ], dtype=np.int32)
+    return verts, edges
+
+
+def _gen_pyramid():
+    s = 1.3
+    verts = np.array([
+        [0, s, 0],
+        [-s, -s, s], [s, -s, s], [s, -s, -s], [-s, -s, -s],
+    ], dtype=np.float64)
+    edges = np.array([
+        [1, 2], [2, 3], [3, 4], [4, 1],
+        [0, 1], [0, 2], [0, 3], [0, 4],
+    ], dtype=np.int32)
+    return verts, edges
+
+
+def _gen_cone(n_sides=16):
+    r = 1.2
+    h = 1.5
+    angles = np.linspace(0, 2 * np.pi, n_sides, endpoint=False)
+    base_x = r * np.cos(angles)
+    base_z = r * np.sin(angles)
+    apex = np.array([[0.0, h, 0.0]])
+    base = np.column_stack([base_x, np.full(n_sides, -h), base_z])
+    verts = np.vstack([apex, base]).astype(np.float64)
+
+    edges = []
+    for i in range(n_sides):
+        j = (i + 1) % n_sides
+        edges.append([1 + i, 1 + j])
+        edges.append([0, 1 + i])
+    return verts, np.array(edges, dtype=np.int32)
+
+
+def _gen_sphere(detail):
+    r = 1.3
+    ncols = detail * 2
+    i_vals = np.arange(detail)
+    j_vals = np.arange(ncols)
+    ig, jg = np.meshgrid(i_vals, j_vals, indexing='ij')
+    i_flat = ig.ravel().astype(np.float64)
+    j_flat = jg.ravel().astype(np.float64)
+
+    theta = np.pi * (i_flat / max(detail - 1, 1))
+    phi = 2 * np.pi * (j_flat / ncols)
+    st = np.sin(theta)
+    x = r * st * np.cos(phi)
+    y = r * st * np.sin(phi)
+    z = r * np.cos(theta)
+    verts = np.column_stack([x, y, z])
+
+    lat_step = max(1, detail // 8)
+    lon_step = max(1, ncols // 12)
+
+    edges = []
+    for i in range(0, detail, lat_step):
+        for j in range(0, ncols, lon_step):
+            a = i * ncols + j
+            b = i * ncols + min(j + lon_step, ncols) % ncols
+            edges.append([a, b])
+    for j in range(0, ncols, lon_step):
+        for i in range(0, detail - 1, lat_step):
+            a = i * ncols + j
+            b = min(i + lat_step, detail - 1) * ncols + j
+            edges.append([a, b])
+
+    edge_arr = np.array(edges, dtype=np.int32) if edges else np.zeros((0, 2), dtype=np.int32)
+    return verts, edge_arr
+
+
+def _gen_icosahedron():
+    phi = (1 + math.sqrt(5)) / 2
+    raw = np.array([
+        [-1, phi, 0], [1, phi, 0], [-1, -phi, 0], [1, -phi, 0],
+        [0, -1, phi], [0, 1, phi], [0, -1, -phi], [0, 1, -phi],
+        [phi, 0, -1], [phi, 0, 1], [-phi, 0, -1], [-phi, 0, 1],
+    ], dtype=np.float64)
+    norms = np.linalg.norm(raw, axis=1, keepdims=True)
+    verts = raw / norms * 1.3
+    edges = np.array([
+        [0, 11], [0, 5], [0, 1], [0, 7], [0, 10],
+        [3, 9], [3, 4], [3, 2], [3, 6], [3, 8],
+        [1, 5], [5, 11], [11, 10], [10, 7], [7, 1],
+        [1, 9], [5, 4], [11, 2], [10, 6], [7, 8],
+        [9, 4], [4, 2], [2, 6], [6, 8], [8, 9],
+        [9, 5], [4, 11], [2, 10], [6, 7], [8, 1],
+    ], dtype=np.int32)
+    return verts, edges
+
+
+def _gen_prism(n_sides):
+    r = 1.2
+    h = 1.0
+    angles = np.linspace(0, 2 * np.pi, n_sides, endpoint=False)
+    top_x = r * np.cos(angles)
+    top_z = r * np.sin(angles)
+    top_y = np.full(n_sides, h)
+    bot_y = np.full(n_sides, -h)
+
+    top_verts = np.column_stack([top_x, top_y, top_z])
+    bot_verts = np.column_stack([top_x, bot_y, top_z])
+    verts = np.vstack([top_verts, bot_verts]).astype(np.float64)
+
+    edges = []
+    for i in range(n_sides):
+        j = (i + 1) % n_sides
+        edges.append([i, j])
+        edges.append([n_sides + i, n_sides + j])
+        edges.append([i, n_sides + i])
+    return verts, np.array(edges, dtype=np.int32)
+
+
+def _gen_hexagon():
+    return _gen_prism(6)
+
+
+def _gen_octagon():
+    return _gen_prism(8)
+
+
+def _gen_star():
+    verts = np.array([
+        [1, 1, 1], [1, -1, -1], [-1, 1, -1], [-1, -1, 1],
+        [-1, -1, -1], [-1, 1, 1], [1, -1, 1], [1, 1, -1],
+    ], dtype=np.float64) * 0.9
+    edges = np.array([
+        [0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3],
+        [4, 5], [4, 6], [4, 7], [5, 6], [5, 7], [6, 7],
+    ], dtype=np.int32)
+    return verts, edges
+
+
+def _gen_cylinder(nu, nv):
+    r = 1.0
+    h = 1.5
+    u_vals = np.linspace(0, 2 * np.pi, nu, endpoint=False)
+    v_vals = np.linspace(-h, h, nv)
+    ug, vg = np.meshgrid(u_vals, v_vals, indexing='ij')
+    u_flat = ug.ravel()
+    v_flat = vg.ravel()
+
+    x = r * np.cos(u_flat)
+    z = r * np.sin(u_flat)
+    y = v_flat
+    verts = np.column_stack([x, y, z])
+    edges = _make_grid_edges(nu, nv, wrap_v=False)
+    return verts, edges
+
+
+def _gen_helix(n_points):
+    t = np.linspace(0, 4 * np.pi, n_points)
+    r = 1.0
+    x = r * np.cos(t)
+    z = r * np.sin(t)
+    y = np.linspace(-1.5, 1.5, n_points)
+    verts = np.column_stack([x, y, z])
+    edges = np.column_stack([
+        np.arange(n_points - 1, dtype=np.int32),
+        np.arange(1, n_points, dtype=np.int32),
+    ])
+    return verts, edges
+
+
+def _gen_torus(nu, nv):
+    R, r = 1.5, 0.6
+    u_vals = np.linspace(0, 2 * np.pi, nu, endpoint=False)
+    v_vals = np.linspace(0, 2 * np.pi, nv, endpoint=False)
+    ug, vg = np.meshgrid(u_vals, v_vals, indexing='ij')
+    u_flat = ug.ravel()
+    v_flat = vg.ravel()
+
+    x = (R + r * np.cos(v_flat)) * np.cos(u_flat)
+    y = (R + r * np.cos(v_flat)) * np.sin(u_flat)
+    z = r * np.sin(v_flat)
+    verts = np.column_stack([x, y, z])
+    edges = _make_grid_edges(nu, nv)
+    return verts, edges
+
+
+def _gen_torus_knot(n_points, p=3, q=5):
+    R, r = 1.2, 0.4
+    t = np.linspace(0, 2 * np.pi, n_points, endpoint=False)
+    x = (R + r * np.cos(q * t)) * np.cos(p * t)
+    y = (R + r * np.cos(q * t)) * np.sin(p * t)
+    z = r * np.sin(q * t)
+    verts = np.column_stack([x, y, z])
+    edges = np.column_stack([
+        np.arange(n_points, dtype=np.int32),
+        (np.arange(n_points, dtype=np.int32) + 1) % n_points,
+    ])
+    return verts, edges
+
+
+def _gen_mobius(nu, nv):
+    R, wmax = 1.7, 0.5
+    u_vals = np.linspace(0, 2 * np.pi, nu, endpoint=False)
+    w_vals = np.linspace(-wmax, wmax, nv)
+    ug, wg = np.meshgrid(u_vals, w_vals, indexing='ij')
+    u_flat = ug.ravel()
+    w_flat = wg.ravel()
+
+    half_u = u_flat / 2
+    x = (R + w_flat * np.cos(half_u)) * np.cos(u_flat)
+    y = (R + w_flat * np.cos(half_u)) * np.sin(u_flat)
+    z = w_flat * np.sin(half_u)
+    verts = np.column_stack([x, y, z])
+    edges = _make_grid_edges(nu, nv, wrap_v=False, seam=np.arange(nv)[::-1])
+    return verts, edges
+
+
+def _gen_trefoil(n_points):
+    return _gen_torus_knot(n_points, p=2, q=3)
+
+
+# Klein bottle, "bottle" immersion: u in [0, pi) closes onto itself with
+# v -> pi - v, so nv must be even for every seam vertex to have a partner
+def _gen_klein1(nu, nv):
+    nv += nv % 2
+    u_vals = np.linspace(0, np.pi, nu, endpoint=False)
+    v_vals = np.linspace(0, 2 * np.pi, nv, endpoint=False)
+    ug, vg = np.meshgrid(u_vals, v_vals, indexing='ij')
+    u_flat = ug.ravel()
+    v_flat = vg.ravel()
+
+    cu = np.cos(u_flat)
+    su = np.sin(u_flat)
+    cv = np.cos(v_flat)
+    sv = np.sin(v_flat)
+
+    x = -2 / 15 * cu * (3 * cv - 30 * su + 90 * cu ** 4 * su
+                        - 60 * cu ** 6 * su + 5 * cu * cv * su)
+    y = -1 / 15 * su * (3 * cv - 3 * cu ** 2 * cv - 48 * cu ** 4 * cv
+                        + 48 * cu ** 6 * cv - 60 * su + 5 * cu * cv * su
+                        - 5 * cu ** 3 * cv * su - 80 * cu ** 5 * cv * su
+                        + 80 * cu ** 7 * cv * su)
+    z = 2 / 15 * (3 + 5 * cu * su) * sv
+    verts = np.column_stack([x, y, z])
+    verts -= (verts.max(axis=0) + verts.min(axis=0)) / 2
+    verts *= 1.6 / np.abs(verts).max()
+    edges = _make_grid_edges(nu, nv, seam=(nv // 2 - np.arange(nv)) % nv)
+    return verts, edges
+
+
+def _gen_klein2(nu, nv):
+    a = 2.5
+    u_vals = np.linspace(0, 2 * np.pi, nu, endpoint=False)
+    v_vals = np.linspace(0, 2 * np.pi, nv, endpoint=False)
+    ug, vg = np.meshgrid(u_vals, v_vals, indexing='ij')
+    u_flat = ug.ravel()
+    v_flat = vg.ravel()
+
+    cu2 = np.cos(u_flat / 2)
+    su2 = np.sin(u_flat / 2)
+    sv = np.sin(v_flat)
+    s2v = np.sin(2 * v_flat)
+
+    x = (a + cu2 * sv - su2 * s2v) * np.cos(u_flat) * 0.35
+    y = (a + cu2 * sv - su2 * s2v) * np.sin(u_flat) * 0.35
+    z = (su2 * sv + cu2 * s2v) * 0.35
+    verts = np.column_stack([x, y, z])
+    edges = _make_grid_edges(nu, nv, seam=(nv - np.arange(nv)) % nv)
+    return verts, edges
+
+
+def _gen_lorenz(n_steps):
+    sigma, rho, beta = 10.0, 28.0, 8.0 / 3.0
+    dt_step = 0.005
+
+    xs = np.empty(n_steps, dtype=np.float64)
+    ys = np.empty(n_steps, dtype=np.float64)
+    zs = np.empty(n_steps, dtype=np.float64)
+    xs[0], ys[0], zs[0] = 1.0, 1.0, 1.0
+
+    for i in range(1, n_steps):
+        x, y, z = xs[i - 1], ys[i - 1], zs[i - 1]
+        xs[i] = x + sigma * (y - x) * dt_step
+        ys[i] = y + (x * (rho - z) - y) * dt_step
+        zs[i] = z + (x * y - beta * z) * dt_step
+
+    verts = np.column_stack([xs, ys, zs])
+    center = (verts.max(axis=0) + verts.min(axis=0)) / 2
+    verts -= center
+    max_ext = np.abs(verts).max()
+    if max_ext > 0:
+        verts *= 1.5 / max_ext
+
+    edges = np.column_stack([
+        np.arange(n_steps - 1, dtype=np.int32),
+        np.arange(1, n_steps, dtype=np.int32),
+    ])
+    return verts, edges
+
+
+def _gen_mandelbrot(nu, nv, max_iter=50):
+    re_vals = np.linspace(-2.0, 0.8, nu)
+    im_vals = np.linspace(-1.2, 1.2, nv)
+    re_grid, im_grid = np.meshgrid(re_vals, im_vals, indexing='ij')
+    c = (re_grid + 1j * im_grid).ravel()
+
+    z = np.zeros(len(c), dtype=np.complex128)
+    iterations = np.full(len(c), max_iter, dtype=np.int32)
+    active = np.ones(len(c), dtype=bool)
+
+    for i in range(max_iter):
+        z[active] = z[active] ** 2 + c[active]
+        escaped = active & ((np.abs(z) > 2.0) | ~np.isfinite(np.abs(z)))
+        iterations[escaped] = i
+        active &= ~escaped
+        if not active.any():
+            break
+
+    height = iterations.astype(np.float64) / max_iter
+    x = re_grid.ravel() * 0.5
+    z_coord = im_grid.ravel() * 0.5
+    y = height * 1.5 - 0.75
+    verts = np.column_stack([x, y, z_coord])
+    edges = _make_grid_edges_open(nu, nv)
+    return verts, edges
+
+
+def _gen_julia(nu, nv, max_iter=50):
+    c_param = -0.7 + 0.27015j
+    re_vals = np.linspace(-1.5, 1.5, nu)
+    im_vals = np.linspace(-1.5, 1.5, nv)
+    re_grid, im_grid = np.meshgrid(re_vals, im_vals, indexing='ij')
+    z = (re_grid + 1j * im_grid).ravel()
+
+    iterations = np.full(len(z), max_iter, dtype=np.int32)
+    active = np.ones(len(z), dtype=bool)
+
+    for i in range(max_iter):
+        z[active] = z[active] ** 2 + c_param
+        escaped = active & ((np.abs(z) > 2.0) | ~np.isfinite(np.abs(z)))
+        iterations[escaped] = i
+        active &= ~escaped
+        if not active.any():
+            break
+
+    height = iterations.astype(np.float64) / max_iter
+    x = re_grid.ravel() * 0.5
+    z_coord = im_grid.ravel() * 0.5
+    y = height * 1.5 - 0.75
+    verts = np.column_stack([x, y, z_coord])
+    edges = _make_grid_edges_open(nu, nv)
+    return verts, edges
+
+
+# ── Shape registry ───────────────────────────────────
+
+SHAPE_DEFS = [
+    # key 1
+    ("Cube",          lambda: get_cached("cube", _gen_cube)),
+    ("Octahedron",    lambda: get_cached("octahedron", _gen_octahedron)),
+    # key 2
+    ("Pyramid",       lambda: get_cached("pyramid", _gen_pyramid)),
+    ("Cone",          lambda: get_cached("cone", _gen_cone)),
+    # key 3
+    ("Sphere",        lambda: get_cached("sphere", _gen_sphere,
+                                         max(6, int(14 * config.density.value)))),
+    ("Icosahedron",   lambda: get_cached("icosa", _gen_icosahedron)),
+    # key 4
+    ("Hexagon",       lambda: get_cached("hexagon", _gen_hexagon)),
+    ("Octagon",       lambda: get_cached("octagon", _gen_octagon)),
+    ("Star",          lambda: get_cached("star", _gen_star)),
+    # key 5
+    ("Cylinder",      lambda: get_cached("cylinder", _gen_cylinder,
+                                         max(10, int(24 * config.density.value)),
+                                         max(4, int(8 * config.density.value)))),
+    ("Helix",         lambda: get_cached("helix", _gen_helix,
+                                         max(80, int(200 * config.density.value)))),
+    # key 6
+    ("Torus",         lambda: get_cached("torus", _gen_torus,
+                                         max(10, int(24 * config.density.value)),
+                                         max(6, int(12 * config.density.value)))),
+    ("Torus Knot",    lambda: get_cached("tknot", _gen_torus_knot,
+                                         max(100, int(300 * config.density.value)))),
+    # key 7
+    ("Mobius Strip",  lambda: get_cached("mobius", _gen_mobius,
+                                         max(20, int(60 * config.density.value)),
+                                         max(4, int(8 * config.density.value)))),
+    ("Trefoil Knot",  lambda: get_cached("trefoil", _gen_trefoil,
+                                         max(100, int(300 * config.density.value)))),
+    # key 8
+    ("Klein 1",       lambda: get_cached("klein1", _gen_klein1,
+                                         max(20, int(50 * config.density.value)),
+                                         max(8, int(16 * config.density.value)))),
+    ("Klein 2",       lambda: get_cached("klein2", _gen_klein2,
+                                         max(20, int(50 * config.density.value)),
+                                         max(8, int(16 * config.density.value)))),
+    # key 9
+    ("Lorenz",        lambda: get_cached("lorenz", _gen_lorenz,
+                                         max(500, int(3000 * config.density.value)))),
+    # key 0
+    ("Mandelbrot",    lambda: get_cached("mandelbrot", _gen_mandelbrot,
+                                         max(15, int(35 * config.density.value)),
+                                         max(15, int(35 * config.density.value)))),
+    ("Julia",         lambda: get_cached("julia", _gen_julia,
+                                         max(15, int(35 * config.density.value)),
+                                         max(15, int(35 * config.density.value)))),
+]
+
+SHAPE_KEY_GROUPS = {
+    '1': [0, 1],
+    '2': [2, 3],
+    '3': [4, 5],
+    '4': [6, 7, 8],
+    '5': [9, 10],
+    '6': [11, 12],
+    '7': [13, 14],
+    '8': [15, 16],
+    '9': [17],
+    '0': [18, 19],
+}
+
+
+def shape_key_for_index(idx):
+    for key, group in SHAPE_KEY_GROUPS.items():
+        if idx in group:
+            return key
+    return "?"
+
+
+def draw_shape(idx, ax, ay, az, scale, scr, frame_count):
+    _, get_geo = SHAPE_DEFS[idx]
+    verts, edges = get_geo()
+
+    xs, ys, zs = batch_rotate_project(verts, ax, ay, az, scale)
+
+    mode = config.color_mode
+    color_lut = None
+    static_color = ""
+
+    if mode == "shape":
+        if config.shape_color_idx >= 0:
+            static_color = SHAPE_COLORS[config.shape_color_idx % len(SHAPE_COLORS)]
+        else:
+            static_color = SHAPE_COLORS[idx % len(SHAPE_COLORS)]
+    elif mode == "depth":
+        color_lut = _get_palette_lut(config.depth_palette_idx)
+    elif mode == "rotate":
+        cidx = (idx + frame_count // 10) % len(SHAPE_COLORS)
+        static_color = SHAPE_COLORS[cidx]
+
+    ramp = BRIGHTNESS_RAMPS[config.brightness_ramp_idx % len(BRIGHTNESS_RAMPS)]
+
+    if config.render_mode == "points":
+        scr.draw_points(xs, ys, zs, ramp, color_lut, static_color)
+    else:
+        if len(edges) == 0:
+            return
+        e0 = edges[:, 0]
+        e1 = edges[:, 1]
+        scr.draw_lines(
+            xs[e0], ys[e0], zs[e0],
+            xs[e1], ys[e1], zs[e1],
+            ramp, color_lut, static_color,
+        )
+
+
+# ── Non-blocking input with arrow keys ───────────────
+
+_tty_saved = None
+
+
+def tty_cbreak_on():
+    global _tty_saved
+    if os.name == "nt" or not sys.stdin.isatty():
+        return
+    import termios, tty
+    fd = sys.stdin.fileno()
+    _tty_saved = termios.tcgetattr(fd)
+    tty.setcbreak(fd)
+
+
+def tty_restore():
+    global _tty_saved
+    if _tty_saved is None:
+        return
+    import termios
+    termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, _tty_saved)
+    _tty_saved = None
+
+
+def _read_char(fd, timeout):
+    import select
+    dr, _, _ = select.select([fd], [], [], timeout)
+    if not dr:
+        return None
+    return os.read(fd, 1).decode("ascii", errors="ignore")
+
+
+def get_key():
+    if os.name == "nt":
+        try:
+            import msvcrt
+        except ImportError:
+            return None
+        if msvcrt.kbhit():
+            ch = msvcrt.getwch()
+            if ch in ('\x00', '\xe0'):
+                ch2 = msvcrt.getwch()
+                return {'H': 'UP', 'P': 'DOWN', 'K': 'LEFT', 'M': 'RIGHT'}.get(ch2)
+            if ch == '\r':
+                return 'ENTER'
+            return ch
+        return None
+    else:
+        if not sys.stdin.isatty():
+            return None
+        fd = sys.stdin.fileno()
+        ch = _read_char(fd, 0)
+        if ch is None:
+            return None
+        if ch == '\x1b':
+            if _read_char(fd, 0.02) == '[':
+                return {'A': 'UP', 'B': 'DOWN',
+                        'C': 'RIGHT', 'D': 'LEFT'}.get(_read_char(fd, 0.02))
+            return None
+        if ch in ('\r', '\n'):
+            return 'ENTER'
+        return ch
+
+
+# ── Audio Analyzer ───────────────────────────────────
+
+class AudioAnalyzer:
+    def __init__(self, sample_rate=22050, block_size=1024):
+        self.sample_rate = sample_rate
+        self.block_size = block_size
+        self.running = False
+        self.device_index = None
+        self.device_name = "Default"
+        self.last_error = ""
+        self._stream = None
+        self._lock = threading.Lock()
+        self._rms = 0.0
+        self._onset = False
+        self._bpm = 120.0
+        self._rms_slow = 0.0
+        self._last_onset = 0.0
+        self._onset_times: deque = deque(maxlen=32)
+        self._cooldown = 0.12
+
+    def start(self, device=None):
+        if not HAS_AUDIO:
+            return False
+        self.stop()
+        if device is not None:
+            self.device_index = device
+        try:
+            # WASAPI only accepts the device's own rate (often 48000), so use
+            # that and keep the block length near block_size at sample_rate
+            info = sd.query_devices(self.device_index, kind="input")
+            rate = int(info["default_samplerate"]) or self.sample_rate
+            block = max(256, round(self.block_size * rate / self.sample_rate))
+            self._stream = sd.InputStream(
+                device=self.device_index,
+                samplerate=rate,
+                blocksize=block,
+                channels=1,
+                dtype="float32",
+                callback=self._callback,
+            )
+            self._stream.start()
+            self.running = True
+            self.last_error = ""
+            return True
+        except Exception as e:
+            self.running = False
+            self.last_error = str(e)
+            return False
+
+    def stop(self):
+        if self._stream:
+            try:
+                self._stream.stop()
+                self._stream.close()
+            except Exception:
+                pass
+        self.running = False
+        self._stream = None
+        self._rms_slow = 0.0
+        self._onset_times.clear()
+
+    def _callback(self, indata, frames, time_info, status):
+        rms = float(np.sqrt(np.mean(indata ** 2)))
+        self._rms_slow = self._rms_slow * 0.93 + rms * 0.07
+
+        now = time.time()
+        onset = False
+        sens = config.audio_sens.value
+        threshold = max(self._rms_slow * 3.0, 0.008) / sens
+        if rms > threshold and (now - self._last_onset) > self._cooldown:
+            onset = True
+            self._last_onset = now
+            self._onset_times.append(now)
+
+        bpm = self._bpm
+        if len(self._onset_times) >= 3:
+            times = list(self._onset_times)
+            intervals = [
+                times[i] - times[i - 1]
+                for i in range(1, len(times))
+                if 0.25 < times[i] - times[i - 1] < 2.0
+            ]
+            if len(intervals) >= 2:
+                bpm = clamp(
+                    60.0 / sorted(intervals)[len(intervals) // 2], 60, 240
+                )
+
+        with self._lock:
+            self._rms = rms
+            if onset:
+                self._onset = True
+            self._bpm = bpm
+
+    def get_features(self):
+        with self._lock:
+            rms = self._rms
+            onset = self._onset
+            bpm = self._bpm
+            self._onset = False
+            return rms, onset, bpm
+
+
+audio = AudioAnalyzer()
+
+
+# ── Audio device listing ─────────────────────────────
+
+# Each host API (MME, DirectSound, WASAPI, WDM-KS on Windows) lists the same
+# hardware again, so only list one: WASAPI on Windows (full names, only the
+# devices enabled in Sound settings), the default host API elsewhere
+def _listed_hostapi(hostapis):
+    if os.name == "nt":
+        for i, api in enumerate(hostapis):
+            if "WASAPI" in api["name"]:
+                return i
+    return sd.default.hostapi
+
+
+def list_audio_devices():
+    if not HAS_AUDIO:
+        return [], []
+    try:
+        devices = sd.query_devices()
+        hostapis = sd.query_hostapis()
+    except Exception:
+        return [], []
+    api_idx = _listed_hostapi(hostapis)
+    api = hostapis[api_idx]
+    inputs = []
+    outputs = []
+    for i in api["devices"]:
+        dev = devices[i]
+        name = dev["name"]
+        if dev["max_input_channels"] > 0:
+            is_default = (i == api["default_input_device"])
+            inputs.append((i, name, is_default))
+        if dev["max_output_channels"] > 0:
+            is_default = (i == api["default_output_device"])
+            outputs.append((i, name, is_default))
+    return inputs, outputs
+
+
+# ── Stable sub-menu renderer ────────────────────────
+
+def _menu_write(lines, max_lines=50):
+    tw, _ = terminal_size()
+    tw = max(tw, 60)
+    out = ["\033[H"]
+    for i, line in enumerate(lines):
+        if i >= max_lines:
+            break
+        padded = line[:tw].ljust(tw)
+        out.append(padded)
+        if i < max_lines - 1:
+            out.append("\n")
+    out.append("\033[J")
+    sys.stdout.write("".join(out))
+    sys.stdout.flush()
+
+
+def _switch_audio_device(dev_idx, name):
+    """Point audio at a device and restart it if audio is on. Returns a
+    notice for the menu when the device can't be opened."""
+    was_running = audio.running
+    audio.stop()
+    audio.device_index = dev_idx
+    audio.device_name = name
+    if not (was_running or config.audio_reactive):
+        return ""
+    if audio.start():
+        return ""
+    notice = f"Couldn't open {name}: {audio.last_error}"
+    if dev_idx is not None:
+        audio.device_index = None
+        audio.device_name = "Default"
+        if audio.start():
+            return notice + " - using Default instead"
+    config.audio_reactive = False
+    return notice + " - audio is off"
+
+
+def run_audio_menu():
+    cursor = 0
+    notice = ""
+    while True:
+        lines = []
+        lines.append("Audio Input Device Setup")
+        lines.append("=" * 50)
+        lines.append("")
+
+        if not HAS_AUDIO:
+            lines.append("  Audio libraries not installed.")
+            lines.append("  Run: pip install sounddevice numpy")
+            lines.append("")
+            lines.append("  x = back")
+            _menu_write(lines)
+            ch = get_key()
+            if ch is None:
+                time.sleep(0.1)
+                continue
+            if ch == "x":
+                return
+            continue
+
+        inputs, _ = list_audio_devices()
+
+        if not inputs:
+            lines.append("  No input devices detected.")
+            lines.append("")
+            lines.append("  x = back")
+            _menu_write(lines)
+            ch = get_key()
+            if ch is None:
+                time.sleep(0.1)
+                continue
+            if ch == "x":
+                return
+            continue
+
+        cursor = clamp(cursor, 0, len(inputs) - 1)
+
+        for list_idx, (dev_idx, name, is_def) in enumerate(inputs):
+            active = ">" if dev_idx == audio.device_index else " "
+            if audio.device_index is None and is_def:
+                active = ">"
+            sel = ">>" if list_idx == cursor else "  "
+            def_tag = " [DEFAULT]" if is_def else ""
+            act_tag = " *ACTIVE*" if active == ">" else ""
+            lines.append(f"  {sel} {name}{def_tag}{act_tag}")
+
+        lines.append("")
+        cur = audio.device_name
+        if audio.running:
+            cur += " (active)"
+        lines.append(f"  Selected: {cur}")
+        if notice:
+            lines.append(f"  {notice}")
+        lines.append("")
+        lines.append("  Up/Down = navigate   Enter = select")
+        lines.append("  d = reset to default   x = back")
+
+        _menu_write(lines)
+
+        ch = get_key()
+        if ch is None:
+            time.sleep(0.1)
+            continue
+        if ch == "x":
+            return
+        elif ch == "UP":
+            cursor = max(0, cursor - 1)
+        elif ch == "DOWN":
+            cursor = min(len(inputs) - 1, cursor + 1)
+        elif ch == "ENTER":
+            if cursor < len(inputs):
+                dev_idx, name, _ = inputs[cursor]
+                notice = _switch_audio_device(dev_idx, name)
+        elif ch == "d":
+            notice = _switch_audio_device(None, "Default")
+
+
+def run_resolution_menu():
+    cursor = config.resolution_idx
+    while True:
+        tw, th = terminal_size()
+        lines = []
+        lines.append("Resolution Setup")
+        lines.append("=" * 50)
+        lines.append("")
+        lines.append(f"  Terminal size: {tw}x{th + 1}")
+        lines.append(f"  Current render: {WIDTH}x{HEIGHT}")
+        lines.append("")
+
+        for i, (label, pw, ph) in enumerate(RESOLUTION_PRESETS):
+            sel = ">>" if i == cursor else "  "
+            active = "*" if i == config.resolution_idx else " "
+            if pw is None:
+                dim_str = f"{tw}x{th} (terminal)"
+            else:
+                actual_w = min(pw, tw)
+                actual_h = min(ph, th)
+                dim_str = f"{pw}x{ph}"
+                if actual_w != pw or actual_h != ph:
+                    dim_str += f" -> {actual_w}x{actual_h}"
+            lines.append(f"  {sel}{active} {label:<8} {dim_str}")
+
+        lines.append("")
+        lines.append("  Up/Down = navigate   Enter = select   x = back")
+
+        _menu_write(lines)
+
+        ch = get_key()
+        if ch is None:
+            time.sleep(0.1)
+            continue
+        if ch == "x":
+            return
+        elif ch == "UP":
+            cursor = max(0, cursor - 1)
+        elif ch == "DOWN":
+            cursor = min(len(RESOLUTION_PRESETS) - 1, cursor + 1)
+        elif ch == "ENTER":
+            config.resolution_idx = cursor
+            apply_resolution(config.resolution_idx)
+
+
+# ── FPS tracking & adaptive throttle ─────────────────
+
+class FPSTracker:
+    def __init__(self, target=TARGET_FPS, window=30, settle=10):
+        self.target = target
+        self.settle = settle
+        self.frame_times = deque(maxlen=window)
+        self.work_times = deque(maxlen=window)
+        self.effective_density = 1.0
+
+    def tick(self, dt):
+        self.frame_times.append(dt)
+
+    def add_work(self, seconds):
+        self.work_times.append(seconds)
+
+    @property
+    def fps(self):
+        if not self.frame_times:
+            return 60.0
+        avg = sum(self.frame_times) / len(self.frame_times)
+        return 1.0 / avg if avg > 0 else 60.0
+
+    @property
+    def uncapped_fps(self):
+        # frame rate the render work alone allows; the main loop sleeps to
+        # TARGET_FPS, so fps itself can never show spare headroom
+        if not self.work_times:
+            return float(self.target)
+        work = sorted(self.work_times)[len(self.work_times) // 2]
+        return 1.0 / work if work > 0 else 1000.0
+
+    def adapt(self, base_density):
+        if not config.fps_adapt:
+            self.effective_density = base_density
+            return base_density
+
+        if self.effective_density > base_density:
+            self.effective_density = base_density
+            self.work_times.clear()
+        if len(self.work_times) < self.settle:
+            return self.effective_density
+
+        fps = self.uncapped_fps
+        old = self.effective_density
+
+        if fps < FPS_FLOOR and old > 0.25:
+            self.effective_density = max(0.25, old * 0.8)
+        elif fps < self.target * 0.85 and old > 0.25:
+            self.effective_density = max(0.25, old * 0.95)
+        elif fps > self.target * 1.5 and old < base_density:
+            self.effective_density = min(base_density, old * 1.15)
+
+        if self.effective_density != old:
+            self.work_times.clear()
+        return self.effective_density
+
+
+fps_tracker = FPSTracker()
+
+
+# ── HUD ──────────────────────────────────────────────
+
+def build_hud_line1(bpm_str=""):
+    si = config.shape_index
+    name = SHAPE_DEFS[si][0]
+    key = shape_key_for_index(si)
+    mode = config.color_mode
+    pal = ""
+    if mode == "depth":
+        pal_name = DEPTH_PALETTES[
+            config.depth_palette_idx % len(DEPTH_PALETTES)
+        ][0]
+        inv_tag = " INV" if config.depth_invert else ""
+        pal = f"({pal_name}{inv_tag})"
+    elif mode == "shape":
+        if config.shape_color_idx >= 0:
+            cname = SHAPE_COLOR_NAMES[config.shape_color_idx % len(SHAPE_COLOR_NAMES)]
+            pal = f"({cname})"
+        else:
+            pal = "(auto)"
+    res_label = RESOLUTION_PRESETS[config.resolution_idx][0]
+    fps_str = f"{fps_tracker.fps:.0f}fps"
+    parts = [
+        f"[{key}] {name}",
+        config.render_mode.upper(),
+        f"color:{mode}{pal}",
+        f"{WIDTH}x{HEIGHT}({res_label})",
+        fps_str,
+    ]
+    if config.fps_adapt and fps_tracker.effective_density < config.density.value * 0.99:
+        parts.append(f"THR:{fps_tracker.effective_density:.1f}")
+    if not config.auto_rotate:
+        parts.append("NOROT")
+    if config.audio_reactive:
+        status = bpm_str if bpm_str else "waiting..."
+        onset_tag = ONSET_MODES[config.audio_onset_mode]
+        parts.append(f"AUDIO:{status}({onset_tag})")
+    if config.paused:
+        parts.append("PAUSED")
+    return "  ".join(p for p in parts if p)
+
+
+def build_hud_line2():
+    parts = [p.display() for p in config.all_params]
+    parts.append(f"Brt:{'ON' if config.brightness_enabled else 'OFF'}")
+    parts.append(f"Ramp:{config.brightness_ramp_idx}")
+    return "  ".join(parts)
+
+
+HELP_ITEMS = [
+    "Spc=pause", "0-9=shape(x2=var)", "Shift+0-9=shpColor", "Arrows=rotXY",
+    "<>/,.=rotZ", "r=reset", "o=autorot", "+/-=scl", "f/F=fov", "[/]=spd",
+    "d/D=den", "p=points", "b=brt", "B=ramp", "c=color", "C=pal", "i=inv",
+    "z/Z=depth", "s/S=auto", "a=audio", "n/N=sens", "g=onset", "A=dev",
+    "R=res", "t=adapt", "h=hud", "m=menu", "q=quit",
+]
+
+
+def build_hud_help(width):
+    """Help items wrapped into as many lines as the width needs."""
+    lines = [""]
+    for item in HELP_ITEMS:
+        if lines[-1] and len(lines[-1]) + 1 + len(item) > width:
+            lines.append("")
+        lines[-1] = f"{lines[-1]} {item}" if lines[-1] else item
+    return lines
+
+
+# ── Main menu with arrow navigation ─────────────────
+
+def _build_menu_items():
+    items = []
+
+    def shape_disp():
+        si = config.shape_index
+        key = shape_key_for_index(si)
+        return f"[{key}] {SHAPE_DEFS[si][0]}"
+    def shape_left():
+        config.shape_index = (config.shape_index - 1) % len(SHAPE_DEFS)
+    def shape_right():
+        config.shape_index = (config.shape_index + 1) % len(SHAPE_DEFS)
+    items.append(("Shape", shape_disp, shape_left, shape_right))
+
+    def render_disp():
+        return config.render_mode
+    def render_toggle():
+        config.render_mode = "points" if config.render_mode == "wire" else "wire"
+    items.append(("Render", render_disp, render_toggle, render_toggle))
+
+    for p in config.all_params:
+        label = p.name
+        if p is config.speed_x:
+            def spd_dec(p=p):
+                p.decrease()
+                config.speed_y.decrease()
+            def spd_inc(p=p):
+                p.increase()
+                config.speed_y.increase()
+            items.append((label, lambda p=p: p.display().split(":")[1], spd_dec, spd_inc))
+        else:
+            items.append((label, lambda p=p: p.display().split(":")[1],
+                          lambda p=p: p.decrease(), lambda p=p: p.increase()))
+
+    def autorot_disp():
+        return "ON" if config.auto_rotate else "OFF"
+    def autorot_toggle():
+        config.auto_rotate = not config.auto_rotate
+    items.append(("Auto Rotate", autorot_disp, autorot_toggle, autorot_toggle))
+
+    def brt_disp():
+        return "ON" if config.brightness_enabled else "OFF"
+    def brt_toggle():
+        config.brightness_enabled = not config.brightness_enabled
+    items.append(("Brightness", brt_disp, brt_toggle, brt_toggle))
+
+    def ramp_disp():
+        return f"{config.brightness_ramp_idx} - {repr(BRIGHTNESS_RAMPS[config.brightness_ramp_idx % len(BRIGHTNESS_RAMPS)])}"
+    def ramp_left():
+        config.brightness_ramp_idx = (config.brightness_ramp_idx - 1) % len(BRIGHTNESS_RAMPS)
+    def ramp_right():
+        config.brightness_ramp_idx = (config.brightness_ramp_idx + 1) % len(BRIGHTNESS_RAMPS)
+    items.append(("Brt Ramp", ramp_disp, ramp_left, ramp_right))
+
+    def color_disp():
+        return config.color_mode
+    def color_left():
+        config.color_mode_idx = (config.color_mode_idx - 1) % len(COLOR_MODES)
+    def color_right():
+        config.color_mode_idx = (config.color_mode_idx + 1) % len(COLOR_MODES)
+    items.append(("Color Mode", color_disp, color_left, color_right))
+
+    def pal_disp():
+        idx = config.depth_palette_idx % len(DEPTH_PALETTES)
+        return f"{idx + 1}/{len(DEPTH_PALETTES)} - {DEPTH_PALETTES[idx][0]}"
+    def pal_left():
+        config.depth_palette_idx = (config.depth_palette_idx - 1) % len(DEPTH_PALETTES)
+    def pal_right():
+        config.depth_palette_idx = (config.depth_palette_idx + 1) % len(DEPTH_PALETTES)
+    items.append(("Palette", pal_disp, pal_left, pal_right))
+
+    def invert_disp():
+        return "ON" if config.depth_invert else "OFF"
+    def invert_toggle():
+        config.depth_invert = not config.depth_invert
+    items.append(("Depth Invert", invert_disp, invert_toggle, invert_toggle))
+
+    def shape_col_disp():
+        if config.shape_color_idx < 0:
+            return "auto (per shape)"
+        return f"{config.shape_color_idx} - {SHAPE_COLOR_NAMES[config.shape_color_idx % len(SHAPE_COLOR_NAMES)]}"
+    def shape_col_left():
+        if config.shape_color_idx <= 0:
+            config.shape_color_idx = len(SHAPE_COLORS) - 1
+        else:
+            config.shape_color_idx -= 1
+    def shape_col_right():
+        config.shape_color_idx = (config.shape_color_idx + 1) % len(SHAPE_COLORS)
+    items.append(("Shape Color", shape_col_disp, shape_col_left, shape_col_right))
+
+    def audio_disp():
+        if not HAS_AUDIO:
+            return "N/A"
+        return "ON" if config.audio_reactive else "OFF"
+    def audio_toggle():
+        config.audio_reactive = not config.audio_reactive
+        if config.audio_reactive:
+            if not audio.running:
+                if not audio.start():
+                    config.audio_reactive = False
+        else:
+            audio.stop()
+    items.append(("Audio React", audio_disp, audio_toggle, audio_toggle))
+
+    def onset_disp():
+        return ONSET_MODES[config.audio_onset_mode]
+    def onset_left():
+        config.audio_onset_mode = (config.audio_onset_mode - 1) % len(ONSET_MODES)
+    def onset_right():
+        config.audio_onset_mode = (config.audio_onset_mode + 1) % len(ONSET_MODES)
+    items.append(("Onset Mode", onset_disp, onset_left, onset_right))
+
+    def adapt_disp():
+        return "ON" if config.fps_adapt else "OFF"
+    def adapt_toggle():
+        config.fps_adapt = not config.fps_adapt
+        if config.fps_adapt:
+            fps_tracker.effective_density = config.density.value
+    items.append(("FPS Adapt", adapt_disp, adapt_toggle, adapt_toggle))
+
+    def hud_disp():
+        return "ON" if config.hud_visible else "OFF"
+    def hud_toggle():
+        config.hud_visible = not config.hud_visible
+    items.append(("HUD Overlay", hud_disp, hud_toggle, hud_toggle))
+
+    return items
+
+
+def run_menu():
+    cursor = 0
+    items = _build_menu_items()
+    while True:
+        lines = []
+        lines.append("ASCII 3D Shapes v9.7 - Settings")
+        lines.append("=" * 50)
+        lines.append("")
+
+        for i, (label, disp_fn, _, _) in enumerate(items):
+            sel = ">>" if i == cursor else "  "
+            val = disp_fn()
+            lines.append(f"  {sel} {label + ':':<14} {val}")
+
+        lines.append("")
+        lines.append(f"  FPS: {fps_tracker.fps:.1f}")
+        if config.fps_adapt:
+            lines.append(f"  Eff. density: {fps_tracker.effective_density:.2f}")
+        lines.append(f"  Audio device: {audio.device_name}")
+        lines.append(f"  Shapes: {len(SHAPE_DEFS)} across keys 0-9")
+        lines.append("")
+        lines.append("  Up/Down = navigate   Left/Right = adjust value")
+        lines.append("  A = audio devices   R = resolution")
+        lines.append("  r = reset angles   x = back   q = quit")
+
+        _menu_write(lines)
+
+        ch = get_key()
+        if ch is None:
+            time.sleep(0.1)
+            continue
+        if ch == "x":
+            return "continue"
+        if ch == "q":
+            return "quit"
+        if ch == "r":
+            return "reset_angles"
+        if ch == "A":
+            run_audio_menu()
+            continue
+        if ch == "R":
+            run_resolution_menu()
+            return "resolution_changed"
+        if ch == "UP":
+            cursor = max(0, cursor - 1)
+        elif ch == "DOWN":
+            cursor = min(len(items) - 1, cursor + 1)
+        elif ch == "LEFT":
+            _, _, left_fn, _ = items[cursor]
+            if left_fn:
+                left_fn()
+        elif ch == "RIGHT":
+            _, _, _, right_fn = items[cursor]
+            if right_fn:
+                right_fn()
+        elif ch == "ENTER":
+            _, _, left_fn, right_fn = items[cursor]
+            if right_fn:
+                right_fn()
+
+
+def handle_common_key(ch):
+    if config.handle_key(ch):
+        return True
+
+    if ch in SHAPE_KEY_GROUPS:
+        group = SHAPE_KEY_GROUPS[ch]
+        if config.shape_index in group:
+            pos = group.index(config.shape_index)
+            config.shape_index = group[(pos + 1) % len(group)]
+        else:
+            config.shape_index = group[0]
+        return True
+    elif ch in SHIFT_NUM_MAP:
+        config.shape_color_idx = SHIFT_NUM_MAP[ch]
+        return True
+    elif ch == "p":
+        config.render_mode = (
+            "points" if config.render_mode == "wire" else "wire"
+        )
+        return True
+    elif ch == "o":
+        config.auto_rotate = not config.auto_rotate
+        return True
+    elif ch == "b":
+        config.brightness_enabled = not config.brightness_enabled
+        return True
+    elif ch == "B":
+        config.brightness_ramp_idx = (
+            (config.brightness_ramp_idx + 1) % len(BRIGHTNESS_RAMPS)
+        )
+        return True
+    elif ch == "c":
+        config.color_mode_idx = (
+            (config.color_mode_idx + 1) % len(COLOR_MODES)
+        )
+        return True
+    elif ch == "C":
+        config.depth_palette_idx = (
+            (config.depth_palette_idx + 1) % len(DEPTH_PALETTES)
+        )
+        return True
+    elif ch == "i":
+        config.depth_invert = not config.depth_invert
+        return True
+    elif ch == "a":
+        config.audio_reactive = not config.audio_reactive
+        if config.audio_reactive:
+            if not audio.running:
+                if not audio.start():
+                    config.audio_reactive = False
+        else:
+            audio.stop()
+        return True
+    elif ch == "g":
+        config.audio_onset_mode = (
+            (config.audio_onset_mode + 1) % len(ONSET_MODES)
+        )
+        return True
+    elif ch == "t":
+        config.fps_adapt = not config.fps_adapt
+        if config.fps_adapt:
+            fps_tracker.effective_density = config.density.value
+        return True
+    elif ch == "h":
+        config.hud_visible = not config.hud_visible
+        return True
+    return False
+
+
+# ── Main loop ─────────────────────────────────────────
+
+def main():
+    global WIDTH, HEIGHT, config
+
+    tw, th = terminal_size()
+    WIDTH, HEIGHT = tw, th
+    config = Config(auto_fov=65.0)
+    fps_tracker.effective_density = config.density.value
+    if config.audio_reactive and not audio.start():
+        config.audio_reactive = False
+
+    scr = ScreenBuffer(WIDTH, HEIGHT)
+    angle_x = 0.0
+    angle_y = 0.0
+    angle_z = 0.0
+    last_switch = time.time()
+    last_frame = time.time()
+    frame_count = 0
+    audio_punch = 0.0
+    audio_bpm = 120.0
+    need_resize = False
+    low_fps_frames = 0
+    low_fps_hint = ""
+
+    sys.stdout.write("\033[?25l")
+    sys.stdout.flush()
+    os.system(CLEAR_CMD)
+    tty_cbreak_on()
+
+    try:
+        while True:
+            now = time.time()
+            dt = now - last_frame
+            last_frame = now
+            dt_scale = dt / 0.03 if dt > 0 else 1.0
+
+            fps_tracker.tick(dt)
+
+            if not config.fps_adapt and fps_tracker.fps < 6.0:
+                low_fps_frames += 1
+                if low_fps_frames > 60:
+                    low_fps_hint = "  LOW FPS! Press 't' to enable adaptive mode"
+            else:
+                low_fps_frames = max(0, low_fps_frames - 2)
+                if low_fps_frames == 0:
+                    low_fps_hint = ""
+
+            if need_resize:
+                scr = ScreenBuffer(WIDTH, HEIGHT)
+                os.system(CLEAR_CMD)
+                need_resize = False
+
+            ch = get_key()
+            if ch:
+                if ch == " ":
+                    config.paused = not config.paused
+                elif ch == "q":
+                    return
+                elif ch == "UP":
+                    angle_x -= ARROW_ROT_DELTA
+                elif ch == "DOWN":
+                    angle_x += ARROW_ROT_DELTA
+                elif ch == "LEFT":
+                    angle_y -= ARROW_ROT_DELTA
+                elif ch == "RIGHT":
+                    angle_y += ARROW_ROT_DELTA
+                elif ch == "<" or ch == ",":
+                    angle_z -= ARROW_ROT_DELTA
+                elif ch == ">" or ch == ".":
+                    angle_z += ARROW_ROT_DELTA
+                elif ch == "R":
+                    sys.stdout.write("\033[?25h")
+                    sys.stdout.flush()
+                    run_resolution_menu()
+                    sys.stdout.write("\033[?25l")
+                    sys.stdout.flush()
+                    need_resize = True
+                    last_frame = time.time()
+                elif ch == "A":
+                    sys.stdout.write("\033[?25h")
+                    sys.stdout.flush()
+                    run_audio_menu()
+                    sys.stdout.write("\033[?25l")
+                    sys.stdout.flush()
+                    os.system(CLEAR_CMD)
+                    last_frame = time.time()
+                elif ch == "m":
+                    sys.stdout.write("\033[?25h")
+                    sys.stdout.flush()
+                    result = run_menu()
+                    sys.stdout.write("\033[?25l")
+                    sys.stdout.flush()
+                    os.system(CLEAR_CMD)
+                    last_frame = time.time()
+                    if result == "quit":
+                        return
+                    elif result == "reset_angles":
+                        angle_x = angle_y = angle_z = 0.0
+                    elif result == "resolution_changed":
+                        need_resize = True
+                elif ch == "r":
+                    angle_x = angle_y = angle_z = 0.0
+                else:
+                    handle_common_key(ch)
+
+            if (not (config.audio_reactive and audio.running)
+                    and config.auto_switch.value > 0
+                    and now - last_switch > config.auto_switch.value):
+                config.shape_index = random.randrange(len(SHAPE_DEFS))
+                last_switch = now
+
+            audio_rms = 0.0
+            bpm_str = ""
+            if config.audio_reactive and audio.running:
+                rms, onset, bpm = audio.get_features()
+                audio_rms = rms
+                audio_bpm = bpm
+                bpm_str = f"{bpm:.0f}bpm"
+
+                if onset:
+                    mode = config.audio_onset_mode
+                    do_punch = mode <= 3
+                    do_shape = mode in (0, 1, 4, 5)
+                    do_palette = mode in (0, 2, 4, 6)
+
+                    if do_punch:
+                        audio_punch = 1.0
+                    if do_shape:
+                        config.shape_index = random.randrange(len(SHAPE_DEFS))
+                    if do_palette:
+                        config.depth_palette_idx = (
+                            (config.depth_palette_idx + 1) % len(DEPTH_PALETTES)
+                        )
+                    last_switch = now
+
+                audio_punch *= 0.85 ** dt_scale
+
+            elif config.audio_reactive and not audio.running:
+                bpm_str = "waiting..."
+
+            draw_scale = config.scale.value
+            if config.audio_reactive and audio.running:
+                sens = config.audio_sens.value
+                draw_scale *= (
+                    1.0 + audio_punch * 0.5 * sens + audio_rms * 2.0 * sens
+                )
+
+            eff_density = fps_tracker.adapt(config.density.value)
+            eff_density = round(eff_density * 20) / 20
+            eff_density = max(0.25, eff_density)
+            saved_density = config.density.value
+            config.density.value = eff_density
+
+            work_start = time.time()
+            scr.clear()
+
+            si = config.shape_index
+            draw_shape(si, angle_x, angle_y, angle_z, draw_scale, scr, frame_count)
+
+            config.density.value = saved_density
+
+            if config.hud_visible:
+                scr.put_text(0, 0, build_hud_line1(bpm_str)[:WIDTH])
+                scr.put_text(0, 1, build_hud_line2()[:WIDTH])
+                if low_fps_hint:
+                    scr.put_text(0, 2, low_fps_hint[:WIDTH])
+                help_lines = build_hud_help(WIDTH)
+                for i, line in enumerate(help_lines):
+                    scr.put_text(0, HEIGHT - len(help_lines) + i, line[:WIDTH])
+
+            sys.stdout.write("\033[H")
+            sys.stdout.write(scr.render())
+            sys.stdout.flush()
+            fps_tracker.add_work(time.time() - work_start)
+
+            if not config.paused and config.auto_rotate:
+                if config.audio_reactive and audio.running:
+                    bps = audio_bpm / 60.0
+                    angle_x += bps * 1.0 * dt
+                    angle_y += bps * 0.83 * dt
+                else:
+                    angle_x += config.speed_x.value * dt_scale
+                    angle_y += config.speed_y.value * dt_scale
+
+            frame_count += 1
+
+            target_dt = 1.0 / TARGET_FPS
+            elapsed = time.time() - now
+            sleep_time = target_dt - elapsed
+            if sleep_time > 0.001:
+                time.sleep(sleep_time)
+
+    finally:
+        tty_restore()
+        audio.stop()
+        sys.stdout.write("\033[?25h")
+        sys.stdout.write(COLOR_RESET)
+        sys.stdout.flush()
+        os.system(CLEAR_CMD)
+        print("Goodbye.")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        audio.stop()
+        sys.stdout.write("\033[?25h")
+        sys.stdout.write(COLOR_RESET)
+        sys.stdout.flush()
+        os.system(CLEAR_CMD)
+        print("Interrupted.")

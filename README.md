@@ -7,7 +7,7 @@ detection from any input device). CPU only: Python and NumPy.
 ## Run
 
     pip install -r requirements.txt
-    python shapes_v9-6.py
+    python shapes_v9-7.py
 
 Needs a terminal with 256-color ANSI support (Windows Terminal, macOS Terminal,
 iTerm2, most Linux terminals). `sounddevice` is optional; without it, or without
@@ -22,7 +22,7 @@ its own. The highest number is the newest.
 
 | Key | Shapes (press again to cycle) |
 |---|---|
-| `1` | Cube, Rhombus |
+| `1` | Cube, Octahedron |
 | `2` | Pyramid, Cone |
 | `3` | Sphere, Icosahedron |
 | `4` | Hexagon, Octagon, Star |
@@ -38,7 +38,7 @@ its own. The highest number is the newest.
 | Key | Action |
 |---|---|
 | Space | pause |
-| Arrows, `<` `>` | rotate X/Y, Z |
+| Arrows, `<` `>` or `,` `.` | rotate X/Y, Z |
 | `o` / `r` | auto-rotate on/off / reset rotation |
 | `+` `-` | scale |
 | `f` `F` | field of view |
@@ -55,7 +55,7 @@ its own. The highest number is the newest.
 | `g` | what audio onsets trigger |
 | `t` | adaptive density to hold the frame rate |
 | `R` | resolution |
-| `.` | HUD on/off |
+| `h` | HUD on/off |
 | `m` | settings menu |
 | `q` | quit |
 
