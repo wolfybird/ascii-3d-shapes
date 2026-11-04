@@ -61,6 +61,22 @@ try:
 except ImportError:
     HAS_NUMPY = False
 
+if getattr(sys, "frozen", False) and sys.platform.startswith("linux"):
+    # sounddevice only asks the system for PortAudio; fall back to the copy
+    # bundled with the app when the system has none
+    import ctypes.util
+    import glob
+    _system_find_library = ctypes.util.find_library
+
+    def _find_library(name):
+        found = _system_find_library(name)
+        if found is None and name == "portaudio":
+            bundled = glob.glob(os.path.join(sys._MEIPASS, "libportaudio.so*"))
+            found = bundled[0] if bundled else None
+        return found
+
+    ctypes.util.find_library = _find_library
+
 try:
     import sounddevice as sd
     if HAS_NUMPY:
@@ -3018,6 +3034,28 @@ def open_console():
         return False
 
 
+def selftest():
+    """Draw every shape offscreen and check the optional parts load; used
+    by the build workflow on each OS. Returns the exit code."""
+    global WIDTH, HEIGHT
+    os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+    fe = WindowFrontend()
+    fe.start({"window": [800, 600]})
+    WIDTH, HEIGHT = fe.grid_size(0)
+    scr = ScreenBuffer(WIDTH, HEIGHT)
+    for i in range(len(SHAPE_DEFS)):
+        scr.clear()
+        draw_shape(i, 0.5, 0.7, 0.1, 1.0, scr, 0)
+        fe.present(scr)
+    fe.stop()
+    scr.render_ansi()
+    import tkinter  # noqa: F401
+    print(f"selftest ok: {len(SHAPE_DEFS)} shapes drawn at {WIDTH}x{HEIGHT}, "
+          f"font {os.path.basename(fe.font_path or 'pygame default')}, "
+          f"audio {'yes' if HAS_AUDIO else 'NO'}, tkinter yes")
+    return 0 if HAS_AUDIO else 2
+
+
 def main():
     no_console = sys.stdout is None
     for name in ("stdout", "stderr"):
@@ -3031,11 +3069,17 @@ def main():
     mode_group.add_argument("--terminal", action="store_true",
                             help="draw in this terminal instead")
     parser.add_argument("--panel", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--selftest", action="store_true", help=argparse.SUPPRESS)
     args, _ = parser.parse_known_args()  # macOS may add -psn_... from Finder
 
     if args.panel:
         run_panel()
         return
+    if args.selftest:
+        sys.exit(selftest())
+    exe_name = os.path.splitext(os.path.basename(sys.executable))[0].lower()
+    if getattr(sys, "frozen", False) and exe_name.endswith("-terminal"):
+        args.terminal = not args.window   # the Windows console twin
 
     saved = load_saved()
     frontend = None
