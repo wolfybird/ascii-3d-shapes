@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """
-shapes_v10.py – ASCII 3D Shape Renderer
+shapes_v10-1.py – ShapeRunner: rotating 3D shapes drawn in ASCII
+
+v10.1 (2026-11)
+    - The program is now called ShapeRunner: window title, app names and
+      settings folder. Settings saved by earlier versions are picked up
+      from the old ASCII3DShapes folder
 
 v10 (2026-11)
     - Opens in its own window (pygame) on Windows, macOS and Linux:
@@ -51,8 +56,8 @@ import traceback
 from collections import deque
 from typing import List, Tuple, Callable, Optional
 
-APP_NAME = "ASCII 3D Shapes"
-APP_VERSION = "10"
+APP_NAME = "ShapeRunner"
+APP_VERSION = "10.1"
 
 HAS_AUDIO = False
 try:
@@ -85,7 +90,7 @@ except (ImportError, OSError):  # OSError: PortAudio library not found
     pass
 
 if not HAS_NUMPY:
-    print("shapes_v10 requires numpy: pip install numpy")
+    print(f"{APP_NAME} needs numpy: pip install numpy")
     sys.exit(1)
 
 COLOR_RESET = "\033[0m"
@@ -1619,24 +1624,31 @@ NOT_SAVED = {"paused", "fov"}           # fov is saved relative to the grid
 RESTORED_BY_RUN = {"audio", "resolution"}
 
 
-def settings_dir():
+SETTINGS_FOLDER = "ShapeRunner"
+OLD_SETTINGS_FOLDER = "ASCII3DShapes"   # used before v10.1, read if no new one
+
+
+def settings_dir(folder=SETTINGS_FOLDER):
     if sys.platform == "win32":
         base = os.environ.get("APPDATA") or os.path.expanduser("~")
-        return os.path.join(base, "ASCII3DShapes")
+        return os.path.join(base, folder)
     if sys.platform == "darwin":
-        return os.path.expanduser("~/Library/Application Support/ASCII3DShapes")
+        return os.path.join(
+            os.path.expanduser("~/Library/Application Support"), folder)
     base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
-    return os.path.join(base, "ascii3dshapes")
+    return os.path.join(base, folder.lower())
 
 
 def load_saved():
-    try:
-        with open(os.path.join(settings_dir(), "settings.json"),
-                  encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
+    for folder in (SETTINGS_FOLDER, OLD_SETTINGS_FOLDER):
+        try:
+            with open(os.path.join(settings_dir(folder), "settings.json"),
+                      encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            continue
+        return data if isinstance(data, dict) else {}
+    return {}
 
 
 def restore_settings(settings, data):

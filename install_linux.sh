@@ -1,5 +1,5 @@
 #!/bin/bash
-# Set up ASCII 3D Shapes for the terminal (see install.py):  ./install_linux.sh
+# Set up ShapeRunner for the terminal (see install.py):  ./install_linux.sh
 cd "$(dirname "$0")" || exit 1
 
 if ! command -v python3 >/dev/null 2>&1; then

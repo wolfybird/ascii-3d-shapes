@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Sets up ASCII 3D Shapes to run in the terminal.
+Sets up ShapeRunner to run in the terminal.
 
 It makes a private Python environment in the .venv folder (your other
 Python programs are not touched), installs the packages the program needs
@@ -101,15 +101,15 @@ def make_venv():
 def write_launcher(script):
     """Create the double-click launcher for this OS; returns its name."""
     if os.name == "nt":
-        name = "Run ASCII 3D Shapes.bat"
+        name = "Run ShapeRunner.bat"
         text = ("@echo off\r\n"
                 "cd /d \"%~dp0\"\r\n"
-                "title ASCII 3D Shapes\r\n"
+                "title ShapeRunner\r\n"
                 f"\".venv\\Scripts\\python.exe\" {script} --terminal\r\n"
                 "if errorlevel 1 pause\r\n")
     else:
-        name = ("Run ASCII 3D Shapes.command" if sys.platform == "darwin"
-                else "run_ascii3dshapes.sh")
+        name = ("Run ShapeRunner.command" if sys.platform == "darwin"
+                else "run_shaperunner.sh")
         text = ("#!/bin/bash\n"
                 "cd \"$(dirname \"$0\")\" || exit 1\n"
                 "printf '\\e[8;55;180t'    # ask the terminal for a bigger window\n"
@@ -123,8 +123,8 @@ def write_launcher(script):
 
 
 def main():
-    say("ASCII 3D Shapes - terminal version setup")
-    say("=" * 40)
+    say("ShapeRunner - terminal version setup")
+    say("=" * 36)
     if sys.version_info < (3, 8):
         stop(f"this needs Python 3.8 or newer, and this one is {platform.python_version()}.",
              "Get a newer one at https://www.python.org/downloads/")
@@ -162,7 +162,7 @@ def main():
     launcher = write_launcher(script)
     say(f"  Made \"{launcher}\".")
 
-    say("\n" + "=" * 40)
+    say("\n" + "=" * 36)
     say("All set!")
     if os.name == "nt":
         say(f"To start: double-click \"{launcher}\" in this folder.")

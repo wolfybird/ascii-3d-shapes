@@ -1,4 +1,4 @@
-# Builds ASCII 3D Shapes for Windows, macOS and Linux. Runs when a version
+# Builds ShapeRunner for Windows, macOS and Linux. Runs when a version
 # tag (v10.0, v10.1, ...) is pushed, or by hand from the Actions tab.
 # Each finished app is attached to the run as a download.
 name: Build apps
@@ -15,11 +15,11 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            package: ASCII3DShapes-windows.zip
+            package: ShapeRunner-windows.zip
           - os: macos-latest
-            package: ASCII3DShapes-macos.zip
+            package: ShapeRunner-macos.zip
           - os: ubuntu-22.04        # older glibc, so the app runs on more distros
-            package: ASCII3DShapes-linux.tar.gz
+            package: ShapeRunner-linux.tar.gz
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -36,7 +36,7 @@ jobs:
         run: python -m pip install -r requirements.txt pyinstaller
 
       - name: Build
-        run: pyinstaller --noconfirm ASCII3DShapes.spec
+        run: pyinstaller --noconfirm ShapeRunner.spec
 
       # Linux: remove the system PortAudio first, so the test proves the
       # copy bundled in the app is the one that loads
@@ -44,10 +44,10 @@ jobs:
         shell: bash
         run: |
           case "$RUNNER_OS" in
-            Windows) dist/ASCII3DShapes/ASCII3DShapes-terminal.exe --selftest ;;
-            macOS)   dist/ASCII3DShapes.app/Contents/MacOS/ASCII3DShapes --selftest ;;
+            Windows) dist/ShapeRunner/ShapeRunner-terminal.exe --selftest ;;
+            macOS)   dist/ShapeRunner.app/Contents/MacOS/ShapeRunner --selftest ;;
             Linux)   sudo apt-get remove -y libportaudio2
-                     dist/ASCII3DShapes/ASCII3DShapes --selftest ;;
+                     dist/ShapeRunner/ShapeRunner --selftest ;;
           esac
 
       - name: Package
@@ -55,9 +55,9 @@ jobs:
         run: |
           cd dist
           case "$RUNNER_OS" in
-            Windows) 7z a "../${{ matrix.package }}" ASCII3DShapes ;;
-            macOS)   ditto -c -k --keepParent ASCII3DShapes.app "../${{ matrix.package }}" ;;
-            Linux)   tar czf "../${{ matrix.package }}" ASCII3DShapes ;;
+            Windows) 7z a "../${{ matrix.package }}" ShapeRunner ;;
+            macOS)   ditto -c -k --keepParent ShapeRunner.app "../${{ matrix.package }}" ;;
+            Linux)   tar czf "../${{ matrix.package }}" ShapeRunner ;;
           esac
 
       - uses: actions/upload-artifact@v7
@@ -87,13 +87,14 @@ jobs:
         shell: bash
         run: |
           ls Run* run_* 2>/dev/null || true    # the launcher it made
+          script=$(ls shapes_v*.py)            # only the current version is in the repo
           case "$RUNNER_OS" in
             Windows) py=.venv/Scripts/python.exe ;;
             *)       py=.venv/bin/python ;;
           esac
-          "$py" - <<'EOF'
+          "$py" - "$script" <<'EOF'
           import subprocess, sys
-          p = subprocess.Popen([sys.executable, "shapes_v10.py", "--terminal"],
+          p = subprocess.Popen([sys.executable, sys.argv[1], "--terminal"],
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
           try:
               out, err = p.communicate(timeout=5)
@@ -101,7 +102,7 @@ jobs:
               p.kill()
               out, err = p.communicate()
           frames = out.count(b"\x1b[H")
-          print("frames drawn:", frames)
+          print(sys.argv[1], "frames drawn:", frames)
           print(err.decode(errors="replace"))
           sys.exit(0 if frames > 20 and b"Traceback" not in err else 1)
           EOF

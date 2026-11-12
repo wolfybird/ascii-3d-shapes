@@ -1,8 +1,8 @@
 @echo off
-rem Double-click to set up ASCII 3D Shapes for the terminal (see install.py)
+rem Double-click to set up ShapeRunner for the terminal (see install.py)
 setlocal
 cd /d "%~dp0"
-title ASCII 3D Shapes - Setup
+title ShapeRunner - Setup
 
 rem "py" comes with python.org installs; "python" may be the Store shortcut,
 rem which fails instead of running, so only use it if it really works

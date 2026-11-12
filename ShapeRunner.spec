@@ -1,16 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
-# Builds the app for the OS it runs on: pyinstaller ASCII3DShapes.spec
-#   Windows  dist/ASCII3DShapes/ASCII3DShapes.exe (window) and
-#            ASCII3DShapes-terminal.exe (terminal mode, opens a console)
-#   macOS    dist/ASCII3DShapes.app
-#   Linux    dist/ASCII3DShapes/ASCII3DShapes
+# Builds the app for the OS it runs on: pyinstaller ShapeRunner.spec
+#   Windows  dist/ShapeRunner/ShapeRunner.exe (window) and
+#            ShapeRunner-terminal.exe (terminal mode, opens a console)
+#   macOS    dist/ShapeRunner.app
+#   Linux    dist/ShapeRunner/ShapeRunner
 import os
 import stat
 import sys
 
-APP = 'ASCII3DShapes'
-SCRIPT = 'shapes_v10.py'
-VERSION = '10.0'
+APP = 'ShapeRunner'
+SCRIPT = 'shapes_v10-1.py'
+VERSION = '10.1'
 
 
 a = Analysis(
@@ -74,10 +74,10 @@ if sys.platform == 'darwin':
     app = BUNDLE(
         coll,
         name=APP + '.app',
-        bundle_identifier='io.github.wolfybird.ascii3dshapes',
+        bundle_identifier='io.github.wolfybird.shaperunner',
         version=VERSION,
         info_plist={
-            'CFBundleDisplayName': 'ASCII 3D Shapes',
+            'CFBundleDisplayName': 'ShapeRunner',
             'NSHighResolutionCapable': True,
             # without this macOS stops the app when audio mode opens the mic
             'NSMicrophoneUsageDescription':

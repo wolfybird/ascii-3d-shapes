@@ -16,9 +16,9 @@ dist/
 
 # made by install.py
 .venv/
-Run ASCII 3D Shapes.bat
-Run ASCII 3D Shapes.command
-run_ascii3dshapes.sh
+Run ShapeRunner.bat
+Run ShapeRunner.command
+run_shaperunner.sh
 
 # older versions: kept locally, only the current one is in the repo
 shapes.py
@@ -27,4 +27,5 @@ shapes3.py
 shapes3b.py
 shapes add.py
 shapes_v[4-9]*.py
+shapes_v10.py
 shapes_v7.spec

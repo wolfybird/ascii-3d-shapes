@@ -1,4 +1,4 @@
-# ASCII 3D Shapes
+# ShapeRunner
 
 Rotating 3D wireframes drawn as ASCII art, with a z-buffer, depth-based
 color palettes and optional audio reactivity (onset and BPM detection from
@@ -14,9 +14,9 @@ GitHub Actions builds the apps (see [Build](#build)). Open the latest
 
 | System | File | Start it |
 |---|---|---|
-| Windows | `ASCII3DShapes-windows.zip` | Unzip, then double-click `ASCII3DShapes.exe`. `ASCII3DShapes-terminal.exe` is the terminal version. |
-| macOS (Apple silicon) | `ASCII3DShapes-macos.zip` | Unzip and move `ASCII3DShapes.app` to Applications. |
-| Linux | `ASCII3DShapes-linux.tar.gz` | `tar xzf ASCII3DShapes-linux.tar.gz`, then run `ASCII3DShapes/ASCII3DShapes` (add `--terminal` for the terminal version). |
+| Windows | `ShapeRunner-windows.zip` | Unzip, then double-click `ShapeRunner.exe`. `ShapeRunner-terminal.exe` is the terminal version. |
+| macOS (Apple silicon) | `ShapeRunner-macos.zip` | Unzip and move `ShapeRunner.app` to Applications. |
+| Linux | `ShapeRunner-linux.tar.gz` | `tar xzf ShapeRunner-linux.tar.gz`, then run `ShapeRunner/ShapeRunner` (add `--terminal` for the terminal version). |
 
 The apps aren't signed, so the first launch shows a warning:
 
@@ -36,9 +36,8 @@ alone.
    - **macOS:** double-click `install_mac.command`. If macOS blocks it, right-click it, choose **Open**, then **Open**.
    - **Linux:** in a terminal in the project folder, run `./install_linux.sh`.
 3. Start the program with the launcher the installer makes in the same
-   folder: `Run ASCII 3D Shapes.bat` on Windows,
-   `Run ASCII 3D Shapes.command` on macOS, `./run_ascii3dshapes.sh` on
-   Linux.
+   folder: `Run ShapeRunner.bat` on Windows,
+   `Run ShapeRunner.command` on macOS, `./run_shaperunner.sh` on Linux.
 
 If Python is missing, the installer explains how to get it. Running it
 again updates the packages. To remove it, delete the `.venv` folder and the
@@ -47,8 +46,8 @@ launcher.
 ### From source
 
     pip install -r requirements.txt
-    python shapes_v10.py              # in its own window
-    python shapes_v10.py --terminal   # in this terminal
+    python shapes_v10-1.py              # in its own window
+    python shapes_v10-1.py --terminal   # in this terminal
 
 `pygame` gives the window; without it the program runs in the terminal.
 `sounddevice` is optional and needs PortAudio, which Linux may need
@@ -97,9 +96,9 @@ dropdowns.
 | `q` | quit |
 
 Settings are remembered between runs. They are stored, with a `crash.log`
-if something goes wrong, in `%APPDATA%\ASCII3DShapes` on Windows,
-`~/Library/Application Support/ASCII3DShapes` on macOS and
-`~/.config/ascii3dshapes` on Linux. **Menu → Reset all settings** goes back
+if something goes wrong, in `%APPDATA%\ShapeRunner` on Windows,
+`~/Library/Application Support/ShapeRunner` on macOS and
+`~/.config/shaperunner` on Linux. **Menu → Reset all settings** goes back
 to the defaults.
 
 ## Shapes
@@ -119,22 +118,25 @@ to the defaults.
 
 ## Versions
 
-`shapes_v10.py` is the current version, a single self-contained file. Each
-version is developed as a new numbered copy; older ones are kept outside
-the repo (they are still in the git history).
+`shapes_v10-1.py` is the current version, a single self-contained file.
+Each version is developed as a new numbered copy; older ones are kept
+outside the repo (they are still in the git history).
+
+Up to v10 the project was called ASCII 3D Shapes. Settings saved under that
+name (in an `ASCII3DShapes` folder) are picked up the first time v10.1 runs.
 
 ## Build
 
 PyInstaller can only build for the system it runs on. On each system, run
 
-    pyinstaller ASCII3DShapes.spec
+    pyinstaller ShapeRunner.spec
 
 or `./build_mac.sh` on a Mac. The result is in `dist/`: a folder with
-`ASCII3DShapes.exe` and `ASCII3DShapes-terminal.exe` on Windows,
-`ASCII3DShapes.app` on macOS, and an `ASCII3DShapes` folder on Linux.
+`ShapeRunner.exe` and `ShapeRunner-terminal.exe` on Windows,
+`ShapeRunner.app` on macOS, and a `ShapeRunner` folder on Linux.
 
 GitHub Actions builds all three and test-starts each one whenever a version
-tag is pushed (`git tag v10.0 && git push origin v10.0`), or when **Build
+tag is pushed (`git tag v10.1 && git push origin v10.1`), or when **Build
 apps** is run by hand from the Actions tab. It also tests the installer on
 each system.
 

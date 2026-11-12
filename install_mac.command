@@ -1,5 +1,5 @@
 #!/bin/bash
-# Double-click to set up ASCII 3D Shapes for the terminal (see install.py)
+# Double-click to set up ShapeRunner for the terminal (see install.py)
 cd "$(dirname "$0")" || exit 1
 
 # On a fresh Mac, python3 offers to install Apple's developer tools first
