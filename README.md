@@ -119,8 +119,9 @@ to the defaults.
 
 ## Versions
 
-Each `shapes_v*.py` is a standalone snapshot, kept so any version still runs
-on its own. The highest number is the newest.
+`shapes_v10.py` is the current version, a single self-contained file. Each
+version is developed as a new numbered copy; older ones are kept outside
+the repo (they are still in the git history).
 
 ## Build
 
